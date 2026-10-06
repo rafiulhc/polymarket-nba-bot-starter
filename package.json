@@ -1,0 +1,36 @@
+{
+  "name": "polymarket-nba-bot-starter",
+  "version": "1.0.0",
+  "description": "Starter template for an automated trading bot on live NBA markets on Polymarket",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "polymarket",
+    "trading-bot",
+    "nba",
+    "prediction-markets",
+    "clob"
+  ],
+  "author": "Rafiul Hasan Chowdhury",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^4.12.0",
+    "@polymarket/order-utils": "^2.1.0",
+    "dotenv": "^16.3.1",
+    "ethers": "^5.7.2",
+    "express": "^4.18.2",
+    "moment-timezone": "^0.5.46",
+    "mongodb": "^6.11.0",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

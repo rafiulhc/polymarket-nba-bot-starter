@@ -1,73 +1,106 @@
-# Polymarket NBA Bot Starter
+<div align="center">
 
-A clean, configurable starter template for an automated trading bot on **live NBA game markets on [Polymarket](https://polymarket.com)**.
+# 🏀 Polymarket NBA Bot Starter
 
-While a game is in progress, the bot looks for evenly priced matchups, buys **both** teams, and then exits each side when the game breaks one way: it cuts the losing team early and sells the winning team close to $1.
+**An automated, fail-safe trading bot for live NBA prediction markets on [Polymarket](https://polymarket.com).**
 
-- 🧪 **Dry-run by default.** It logs what it would trade until you explicitly turn trading on.
-- ⚙️ **Every strategy setting is configurable** through environment variables, so there's no need to edit code.
-- 🗄️ **Optional MongoDB logging** of every order, both real and dry-run.
-- 🛡️ **Built-in safety guards** against double-buying, one-sided positions and stacked orders.
+It trades in real time on Polygon through Polymarket's order book (CLOB) API. It is configured entirely through environment variables, and it runs in **dry-run mode** by default.
+
+[![CI](https://github.com/rafiulhc/polymarket-nba-bot-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/rafiulhc/polymarket-nba-bot-starter/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-50%20passing-brightgreen)](#testing)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Polymarket CLOB](https://img.shields.io/badge/Polymarket-CLOB%20API-2E5CFF)](https://docs.polymarket.com)
+[![Polygon](https://img.shields.io/badge/Chain-Polygon-8247E5?logo=polygon&logoColor=white)](https://polygon.technology)
+[![MongoDB](https://img.shields.io/badge/MongoDB-optional-47A248?logo=mongodb&logoColor=white)](https://www.mongodb.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Architecture](#architecture) · [Engineering decisions](#engineering-decisions) · [Testing](#testing) · [Configuration](#configuration)
+
+</div>
+
+---
 
 > [!WARNING]
-> With `DRY_RUN=false`, this bot trades real money. Prediction markets are risky, and this strategy **can and will lose money** in some games. Nothing here is financial advice. Run it in dry-run mode first, then with small amounts, and only if Polymarket is legally available to you where you live.
+> With `DRY_RUN=false`, this bot trades **real money**. Prediction markets are risky, and this strategy **can and will lose money** in some games. Nothing here is financial advice. Use it only where Polymarket is legally available to you.
+
+## ✨ Highlights
+
+- **⚡ Real-time trading:** checks every live NBA game every 5 seconds and places signed orders through Polymarket's order book.
+- **🧪 Dry-run by default:** the whole pipeline runs, but orders are logged instead of sent. Real trading needs an explicit `DRY_RUN=false`.
+- **🛡️ Fails safe:** guards against overlapping runs, duplicate entries, one-sided positions and stacked orders. When it's unsure, it does nothing.
+- **⚙️ Settings in `.env`, not code:** 20+ strategy and schedule settings, checked at startup.
+- **🗄️ Order audit log:** optional MongoDB log of every order, real or simulated, with the full API response.
+- **✅ Tested:** 50 tests cover every entry rule, exit rule and safety guard, and run in CI on Node 20 and 22. No network, wallet or database needed.
+- **📦 Easy to deploy:** one `Procfile` for Heroku, plus a `/health` endpoint for uptime checks.
 
 ---
 
-## Table of contents
+<a id="quick-start"></a>
 
-- [Quick start](#quick-start)
-- [How it works](#how-it-works)
-- [The strategy in numbers](#the-strategy-in-numbers)
-- [Configuration](#configuration)
-- [MongoDB order logging](#mongodb-order-logging)
-- [Deploying to Heroku](#deploying-to-heroku)
-- [Safety features](#safety-features)
-- [Risks](#risks)
-- [Known limitations](#known-limitations)
-- [Project structure](#project-structure)
-- [Ideas for extending it](#ideas-for-extending-it)
+## 🚀 Quick start
 
----
-
-## Quick start
-
-**Requirements:** Node.js 20+, a Polymarket account with USDC in its proxy wallet, and Polymarket CLOB API credentials.
+**Requirements:** Node.js 20+, a Polymarket account with USDC in its proxy wallet, and [Polymarket CLOB API credentials](https://docs.polymarket.com).
 
 ```bash
-git clone https://github.com/<your-username>/polymarket-nba-bot-starter.git
+git clone https://github.com/rafiulhc/polymarket-nba-bot-starter.git
 cd polymarket-nba-bot-starter
 npm install
-cp .env.example .env     # then fill in your credentials
+cp .env.example .env   # add your credentials
 npm start
 ```
 
-The bot starts in **dry-run mode**:
-
 ```text
 DRY RUN mode: orders are logged, not placed. Set DRY_RUN=false to trade.
+MONGODB_URI not set, order logging to MongoDB is disabled.
+Health check on port 3312
+Live NBA events: 3
+Lakers vs Celtics: ~1h 12m left, spread 0.01
+Lakers vs Celtics: best asks 0.49 / 0.52
+Lakers vs Celtics: entry rules met, buying both teams.
+[DRY RUN] would place order { tokenID: '…', price: 0.5, side: 'BUY', size: 100, orderType: 'GTC' }
 ```
 
-Watch it during a few live games. When you're happy with what it would have done, set `DRY_RUN=false` in `.env`.
+Watch it during a few live games. When you trust what it would have done, set `DRY_RUN=false`.
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `npm start` | Runs the bot |
-| `npm run dev` | Runs the bot and restarts it when the code changes |
+| `npm start` | Run the bot |
+| `npm run dev` | Run the bot and restart it on code changes (nodemon) |
+| `npm test` | Run the test suite (about 0.2 s, fully offline) |
+| `curl localhost:3312/health` | Check that the bot is running → `{"ok":true,"dryRun":true}` |
 
 ---
 
-## How it works
+<a id="how-it-works"></a>
 
-Every 5 seconds during trading hours (by default **10 AM – 10 PM Pacific**), the bot runs one cycle:
+## 🧠 How it works
+
+### The strategy
+
+While a game is live and still close, the bot **buys both teams**. Then it **exits each side separately**:
+
+- **Stop-loss:** when a team's price falls to **0.25 or below**, it's probably losing, so sell what's left.
+- **Take-profit:** when a team's price rises to **0.96 or above**, it has almost certainly won, so sell near $1.
+
+This is **not arbitrage**. Holding both sides costs about $1, which is roughly what they pay out. The profit comes entirely from the exit rules, so this is a bet that **games break one way and stay that way**.
+
+| Scenario ($50 per side at 0.50) | Loser exits at | Winner exits at | P&L |
+|---|---|---|---|
+| ✅ Clear winner | 0.25 → $25 | 0.96 → $96 | **+$21** |
+| ⚠️ Price gaps past the stop-loss | 0.10 → $10 | 0.96 → $96 | **+$6** |
+| ❌ Comeback (both sides hit the stop-loss) | 0.25 → $25 | 0.25 → $25 | **−$50** |
+
+### One cycle
 
 ```mermaid
 flowchart TD
-    A[Start cycle] --> B{Previous cycle<br/>still running?}
+    A[Every 5 seconds] --> B{Previous cycle<br/>still running?}
     B -- yes --> Z[Skip]
-    B -- no --> C[Load my open positions]
+    B -- no --> T{Within trading hours?}
+    T -- no --> Z
+    T -- yes --> C[Load open positions]
     C -- failed --> Z
-    C --> D[Fetch live NBA events<br/>from Gamma API]
+    C --> D[Fetch live NBA events]
     D --> E[For each live game]
     E --> F{Entry rules met?}
     F -- no --> E
@@ -76,58 +109,138 @@ flowchart TD
     G --> H[Buy team B]
     H -- failed --> I[Cancel team A order]
     H -- ok --> E
-    E -- all games checked --> J[For each NBA position]
-    J --> K{Best bid hits stop-loss<br/>or take-profit?}
-    K -- yes --> L[Sell at best bid]
+    E -- done --> J[For each NBA position]
+    J --> K{Stop-loss or<br/>take-profit hit?}
+    K -- yes --> L[Sell at best bid<br/>expires in 65 s]
     K -- no --> J
 ```
 
-### Entry: when the bot buys
+### Entry rules
 
-The bot buys both teams in a game only when **all** of these are true:
+The bot buys a game only when **all** of these are true:
 
 | Rule | Default | Why |
 |---|---|---|
-| Game is in progress | started, and less than 111 min ago | Only live games move enough |
+| Game is live | less than 111 min after tip-off | Only live games move enough |
 | No position or open order in this game | — | Never doubles up |
-| Market spread | ≤ 0.05 | Avoids illiquid markets |
-| Each team's best ask | 0.30 – 0.70 | The game is still close |
-| Sum of both best asks | ≤ 1.02 | Keeps the cost of holding both sides near $1 |
-
-Each side is bought for up to **$50**, priced at the second-best ask so that the order fills.
-
-### Exit: when the bot sells
-
-Each position is sold separately when its best bid reaches:
-
-- **≤ 0.25** (stop-loss): this team is probably losing, so sell what's left.
-- **≥ 0.96** (take-profit): this team has almost certainly won, so take the profit.
-
-Sell orders are only placed when the spread is ≤ 0.06. They expire after 65 seconds, so a stale price never sits on the order book.
+| Market spread | ≤ 0.05 | Skips illiquid markets |
+| Each team's best ask | 0.30 – 0.70 | The game is still competitive |
+| Sum of both best asks | ≤ 1.02 | Holding both sides costs about $1 |
 
 ---
 
-## The strategy in numbers
+<a id="architecture"></a>
 
-This is **not arbitrage**. Buying both sides for ~$1.00 combined is break-even at best. All of the profit comes from the exit rules.
+## 🏗 Architecture
 
-Example with both teams at 0.50 and $50 per side (100 shares each):
+```mermaid
+flowchart LR
+    subgraph Bot["Node.js process"]
+        IDX[index.js<br/>startup · scheduler · /health]
+        CFG[config.js<br/>load + check .env]
+        BOT[bot.js<br/>strategy · cycle loop]
+        PM[polymarket.js<br/>API client · orders]
+        DB[db.js<br/>order audit log]
+    end
 
-| Game outcome | Losing side sold at | Winning side sold at | Result |
-|---|---|---|---|
-| ✅ Clear winner, no comeback | 0.25 → **$25** | 0.96 → **$96** | **+$21** |
-| ❌ Comeback (team A drops to 0.25, then wins) | Team A at 0.25 → **$25** | Team B also drops to 0.25 → **$25** | **−$50** |
-| ⚠️ Price gaps past the stop-loss | e.g. 0.10 → **$10** | 0.96 → **$96** | **+$6** |
+    IDX --> BOT
+    IDX --> DB
+    BOT --> PM
+    PM --> DB
+    CFG -.-> IDX & BOT & PM & DB
 
-The strategy makes money when games break one way and stay that way. Comebacks are what lose money. Tune the thresholds in [Configuration](#configuration) to change that trade-off.
+    PM -- live events --> GAMMA[(Gamma API)]
+    PM -- positions --> DATA[(Data API)]
+    PM -- order books ·<br/>signed orders --> CLOB[(CLOB API)]
+    CLOB -- settles on --> POLY[(Polygon)]
+    DB -- optional --> MONGO[(MongoDB)]
+```
+
+| Module | Responsibility | Knows about |
+|---|---|---|
+| [`index.js`](index.js) | Starts the bot, schedules cycles, serves `/health` | Everything, at the top level only |
+| [`src/config.js`](src/config.js) | Loads `.env`, applies defaults, checks types and required values | Nothing else |
+| [`src/bot.js`](src/bot.js) | **The strategy:** entry rules, exit rules, cycle loop | `polymarket.js`, not the HTTP or SDK details |
+| [`src/polymarket.js`](src/polymarket.js) | All external API calls, order signing and dry-run handling | `config.js`, `db.js` |
+| [`src/db.js`](src/db.js) | Optional order audit log | `config.js` |
+| [`test/`](test) | Offline test suite with fakes for every external dependency | — |
+
+The strategy module never calls an API directly. That keeps the trading logic readable, makes it possible to test with a fake client, and means you can change the strategy without touching the order code.
 
 ---
 
-## Configuration
+<a id="engineering-decisions"></a>
 
-All settings live in `.env`. See [`.env.example`](.env.example) for a ready-to-copy template.
+## 🧩 Engineering decisions
 
-### Required
+The hard part of a trading bot isn't the strategy. It's making sure the bot **never does something you didn't intend**. Each guard below targets a specific way the bot could lose money:
+
+| Way it could go wrong | Guard | Where |
+|---|---|---|
+| A slow cycle overlaps the next one, and both buy the same game | A lock (`isRunning`) skips a cycle while the previous one is still going | `bot.js` → `tick()` |
+| The positions API fails, so the bot thinks it holds nothing and buys again | **Fails closed:** returns `null` (not `[]`) on error, and the cycle is skipped | `polymarket.js` → `fetchPositions()` |
+| The first buy fills and the second fails, leaving only one team | The second order is placed only if the first succeeded. If the second fails, the first is cancelled | `bot.js` → `tryEnterGame()` |
+| The positions API lags behind a fill, and the bot buys again | Bought tokens are also tracked in memory, and open orders are checked before buying | `bot.js` → `boughtTokens` |
+| A sell from the previous cycle is still open, and another is placed | Positions with open orders are skipped | `bot.js` → `manageExits()` |
+| A stale sell order fills at a bad price minutes later | Sells are good-till-date orders that expire after 65 s | `polymarket.js` → `sell()` |
+| Paying the second-best ask buys more than intended | The number of shares is calculated from the actual order price and **rounded down**, so each side costs at most `USD_PER_SIDE` | `bot.js` → `tryEnterGame()` |
+| One bad market or position stops all the others | Each game and each position runs in its own try/catch | `bot.js` |
+| A logging outage stops trading | Database errors are logged and ignored, so trading continues | `db.js` → `logOrder()` |
+| A typo in `.env` (e.g. `USD_PER_SIDE=5O`) trades with a wrong value | Settings are checked at startup, and the bot stops with a clear message | `config.js` |
+| Someone clones the repo and trades real money by accident | `DRY_RUN` is `true` unless it's explicitly set to `false` | `config.js` |
+| Secrets end up in git | All credentials come from the environment, and `.env*` is ignored by git except for the template | `.gitignore` |
+
+Every guard in this table has a test that fails if the guard is removed. See [Testing](#testing).
+
+---
+
+<a id="testing"></a>
+
+## 🧪 Testing
+
+```bash
+npm test
+```
+
+```text
+# tests 50
+# suites 9
+# pass 50
+# fail 0
+# duration_ms 210
+```
+
+The suite uses Node's built-in test runner (`node:test`), so there are **no extra test dependencies**. It runs **fully offline**: each module is tested on its own, with fakes in place of Polymarket, the network, MongoDB and `.env`. No real orders, wallets or credentials are ever involved.
+
+| File | What it covers |
+|---|---|
+| [`test/bot.test.js`](test/bot.test.js) | Every entry rule (buy and skip cases) · exit rules (stop-loss, take-profit, hold) · overlapping cycles · failing closed · one-sided buys and cancellation · no re-buying · no stacked sells · error isolation · trading hours |
+| [`test/polymarket.test.js`](test/polymarket.test.js) | Dry-run never signs or sends orders · GTC buys and GTD sells with the correct expiry · rejected and failed orders return `null` · positions return `null` (not `[]`) on any failure · live NBA filtering |
+| [`test/config.test.js`](test/config.test.js) | Dry-run default · required credentials · number checking · defaults and overrides |
+| [`test/db.test.js`](test/db.test.js) | Logging is off without `MONGODB_URI` · records include `dryRun` and `createdAt` · write failures never throw |
+
+**The tests catch real bugs.** Putting known bugs back into the code makes the suite fail:
+
+| Bug put back in | Result |
+|---|---|
+| Rounding the number of shares up instead of down | ❌ 2 tests fail |
+| Removing the overlapping-cycle lock | ❌ 1 test fails |
+| Returning `[]` instead of `null` when the positions API fails | ❌ 1 test fails |
+
+Writing the tests also uncovered a real bug: rounding the number of shares to the *nearest* cent could spend slightly more than `USD_PER_SIDE` (e.g. $20.0022 instead of $20). It's now rounded down.
+
+[GitHub Actions](.github/workflows/ci.yml) runs a syntax check and the full suite on Node 20 and 22 for every push and pull request.
+
+---
+
+<a id="configuration"></a>
+
+## ⚙️ Configuration
+
+Copy [`.env.example`](.env.example) to `.env`. Only the Polymarket credentials are required. Everything else has a sensible default.
+
+<details open>
+<summary><b>Required</b></summary>
 
 | Variable | Description |
 |---|---|
@@ -135,21 +248,25 @@ All settings live in `.env`. See [`.env.example`](.env.example) for a ready-to-c
 | `CLOB_SECRET` | CLOB API secret |
 | `CLOB_PASS_PHRASE` | CLOB API passphrase |
 | `PRIVATE_KEY` | Private key of the wallet that signs orders |
-| `PROXY_ADDRESS` | Your Polymarket proxy wallet address, also used to read your positions |
+| `PROXY_ADDRESS` | Your Polymarket proxy wallet address, also used to read positions |
 
-If any of these are missing, the bot stops at startup and tells you which one.
+</details>
 
-### General
+<details>
+<summary><b>General</b></summary>
 
 | Variable | Default | Description |
 |---|---|---|
 | `DRY_RUN` | `true` | Set to `false` to place real orders |
 | `CLOB_API_URL` | `https://clob.polymarket.com` | CLOB endpoint |
-| `MONGODB_URI` | *(empty)* | Optional. See [MongoDB order logging](#mongodb-order-logging) |
-| `MONGODB_DB` | `polymarket` | Database name for order logs |
-| `PORT` | `3312` | Port for the `/health` endpoint |
+| `MONGODB_URI` | *(empty)* | Turns on the order audit log |
+| `MONGODB_DB` | `polymarket` | Database name |
+| `PORT` | `3312` | Port for `/health` |
 
-### Schedule
+</details>
+
+<details>
+<summary><b>Schedule</b></summary>
 
 | Variable | Default | Description |
 |---|---|---|
@@ -158,7 +275,10 @@ If any of these are missing, the bot stops at startup and tells you which one.
 | `TRADING_START_HOUR` | `10` | First trading hour (inclusive) |
 | `TRADING_END_HOUR` | `22` | Last trading hour (exclusive) |
 
-### Strategy
+</details>
+
+<details>
+<summary><b>Strategy</b></summary>
 
 | Variable | Default | Description |
 |---|---|---|
@@ -167,34 +287,44 @@ If any of these are missing, the bot stops at startup and tells you which one.
 | `MIN_ENTRY_PRICE` | `0.30` | Lowest best ask allowed for either team |
 | `MAX_ENTRY_PRICE` | `0.70` | Highest best ask allowed for either team |
 | `MAX_COMBINED_ASK` | `1.02` | Maximum sum of both best asks |
-| `STOP_LOSS_PRICE` | `0.25` | Sell when the best bid falls to or below this |
-| `TAKE_PROFIT_PRICE` | `0.96` | Sell when the best bid rises to or above this |
+| `STOP_LOSS_PRICE` | `0.25` | Sell when the best bid is at or below this |
+| `TAKE_PROFIT_PRICE` | `0.96` | Sell when the best bid is at or above this |
 | `MAX_EXIT_SPREAD` | `0.06` | Maximum spread to place a sell |
 | `SELL_ORDER_TTL_SECONDS` | `65` | How long a sell order stays open |
 | `GAME_DURATION_MINUTES` | `111` | Assumed game length after tip-off |
 
+</details>
+
 ---
 
-## MongoDB order logging
+## 🗄 Order audit log (MongoDB)
 
-Set `MONGODB_URI` to log every order to the `orders` collection. This works with a free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster:
+Set `MONGODB_URI` and every order goes into the `orders` collection. A free [Atlas](https://www.mongodb.com/atlas) cluster is enough.
 
-```dotenv
-MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/
+```json
+{
+  "tokenID": "7132…",
+  "side": "BUY",
+  "price": 0.5,
+  "size": 100,
+  "orderType": "GTC",
+  "success": true,
+  "response": { "orderID": "0x…", "status": "matched" },
+  "dryRun": false,
+  "createdAt": "2026-10-06T19:42:11.000Z"
+}
 ```
 
-Each record contains the token, side, price, size, order type, success flag, Polymarket's response or error, `dryRun`, and `createdAt`.
-
-Logging is **optional and can't break trading**. If `MONGODB_URI` is empty, logging is turned off. If a write fails, the error is printed and the bot carries on.
+Dry-run orders are logged too, with `dryRun: true`, so you can compare simulated and real behaviour.
 
 > [!IMPORTANT]
-> Keep your connection string in `.env` or your host's config, **never in code**. Connection strings contain your database password. In Atlas, also restrict **Network Access** to your server's IP instead of `0.0.0.0/0`.
+> Connection strings contain your database password. Keep them in `.env` or your host's config, **never in code**. In Atlas, restrict **Network Access** to your server's IP.
 
 ---
 
-## Deploying to Heroku
+## ☁️ Deployment
 
-The included `Procfile` runs the bot as a web dyno. The small Express server exposes `GET /health` so the host can see the app is up.
+### Heroku
 
 ```bash
 heroku create
@@ -203,74 +333,66 @@ git push heroku main
 heroku logs --tail
 ```
 
-Run only **one** instance. Two copies of the bot don't know about each other and could both buy the same game.
+### Any VPS (Docker, Railway, Fly.io, EC2…)
+
+The bot is a single Node.js process. Run `npm start` with the environment variables set, and point health checks at `GET /health`.
+
+> [!CAUTION]
+> Run **exactly one instance**. Separate instances don't share state and could both enter the same game.
 
 ---
 
-## Safety features
+## ⚠️ Risks & limitations
 
-| Guard | What it prevents |
+**Market risks**
+- **Comebacks:** the worst case for one game is losing about half of what you put in.
+- **Fast price moves:** in-game prices can jump past the stop-loss in a single play.
+- **Partial fills:** an order that only partly fills before it's cancelled leaves an uneven position.
+- **Platform risk:** funds sit in a Polymarket proxy wallet on Polygon. API outages stop exits until the APIs recover.
+
+**Current limitations**
+- Buy orders are good-till-cancelled and stay open until they fill or are cancelled.
+- Game time is estimated from tip-off, not from the real game clock, so overtime can throw it off.
+- In dry-run mode, positions never change, so the same exit may be logged on every cycle.
+- Bot state is kept in memory and lost on restart. Positions are reloaded from Polymarket, so this doesn't cause duplicate buys.
+
+---
+
+## 🗺 Roadmap
+
+- [x] Unit tests for entry rules, exit rules and every safety guard
+- [x] GitHub Actions CI on Node 20 and 22
+- [ ] Linting with ESLint and Prettier
+- [ ] Dockerfile
+- [ ] Backtesting from recorded order-book snapshots
+- [ ] Live score and game clock from a sports data API
+- [ ] Telegram or Discord alerts on fills and daily P&L
+- [ ] Risk limits: maximum open games and a daily loss limit that stops the bot
+- [ ] Support for other two-outcome live markets (NFL, soccer, esports)
+
+Contributions are welcome. Open an issue to discuss a change first.
+
+---
+
+## 🛠 Tech stack
+
+| Area | Tools |
 |---|---|
-| **Dry-run by default** | Losing money by accident after cloning the repo |
-| **No overlapping cycles** | Two cycles running at once and both buying the same game |
-| **Fails closed** | If positions can't be loaded, the cycle is skipped instead of assuming you hold nothing |
-| **No duplicate entries** | Buying a game you already hold or have open orders in |
-| **No one-sided buys** | If the second buy fails, the first order is cancelled |
-| **Fixed amount per side** | The number of shares is calculated from the actual order price, so each side costs at most `USD_PER_SIDE` |
-| **No stacked sells** | A new sell isn't placed while a previous one is still open |
-| **Errors are isolated** | An error on one game or position doesn't stop the others |
-| **Config is checked at startup** | A missing credential or a number typo stops the bot with a clear message |
+| Runtime | Node.js 20, Express |
+| Trading | `@polymarket/clob-client`, `@polymarket/order-utils`, `ethers` v5 (EIP-712 order signing) |
+| Data | Polymarket Gamma API (markets), Data API (positions), CLOB API (order books and orders) |
+| Storage | MongoDB (optional audit log) |
+| Testing | `node:test`, `node:assert`, fakes injected through the require cache |
+| Ops | GitHub Actions CI, dotenv, Heroku `Procfile`, `/health` endpoint |
 
 ---
 
-## Risks
+## 👤 Author
 
-- **Comebacks.** The worst case for one game is losing about half of what you put in.
-- **Fast price moves.** In-game prices can jump past the stop-loss in one play, so the actual sell price may be much lower.
-- **Partial fills.** If an order only partly fills before it is cancelled, you hold an uneven position on one side.
-- **API outages.** If Polymarket's APIs are slow or down, the bot skips cycles, and it can't exit positions until they recover.
-- **Smart contract and platform risk.** Your funds sit in a Polymarket proxy wallet on Polygon.
+**Rafiul Hasan Chowdhury** · [GitHub @rafiulhc](https://github.com/rafiulhc)
 
----
+If this project helped you, consider giving it a ⭐.
 
-## Known limitations
+## 📄 License
 
-- Buy orders are good-till-cancelled. An order that never fills stays open until you cancel it.
-- Game time is estimated from the scheduled start time, not from the actual game clock. Overtime and long delays can make it wrong.
-- In dry-run mode, positions never change, so the same exit can be logged on every cycle.
-- There are no automated tests or backtests yet.
-
----
-
-## Project structure
-
-```text
-polymarket-nba-bot-starter/
-├── index.js              # entry point: startup, scheduler, /health endpoint
-├── src/
-│   ├── config.js         # loads and validates all settings from .env
-│   ├── bot.js            # the strategy: entry rules, exit rules, cycle loop
-│   ├── polymarket.js     # Polymarket APIs: order books, orders, positions, markets
-│   └── db.js             # optional MongoDB order logging
-├── .env.example          # template for your .env
-├── Procfile              # Heroku process definition
-└── package.json
-```
-
-To change the **strategy**, edit `src/bot.js`. To change **how orders are placed**, edit `src/polymarket.js`.
-
----
-
-## Ideas for extending it
-
-- **Backtesting:** record order-book snapshots to MongoDB and replay them to test thresholds before risking money.
-- **Use the real game clock:** read the score and time remaining from a sports data API instead of estimating them.
-- **Alerts:** send a Telegram or Discord message on every fill and every daily profit or loss.
-- **Other sports:** the logic works for any two-outcome live market. Change the `seriesSlug` filter in `src/polymarket.js`.
-- **Risk limits:** add a maximum number of open games and a daily loss limit that stops the bot.
-
----
-
-## License
-
-[MIT](LICENSE). This project is provided **as is**, with no warranty. You are responsible for your own trades, your losses, and following Polymarket's terms of service and the laws where you live.
+[MIT](LICENSE). Provided **as is**, with no warranty. You are responsible for your own trades, your losses, and following Polymarket's terms and the laws where you live.
